@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # Worker tuning
     RUNNER_CONCURRENCY: int = 2
+    JOB_STALE_IDLE_MS: int = 1_200_000
     WORKSPACE_ROOT: str = "/work"
     LOG_LEVEL: str = "INFO"
 

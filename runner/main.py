@@ -37,16 +37,14 @@ async def _ensure_consumer_group(redis_client: aioredis.Redis) -> None:
         raise
 
 
-async def _claim_stale(
-    redis_client: aioredis.Redis, consumer: str, idle_ms: int = 60_000
-) -> list[Any]:
+async def _claim_stale(redis_client: aioredis.Redis, consumer: str) -> list[Any]:
     """Auto-claim entries from dead consumers so jobs don't get stuck."""
     try:
         out = await redis_client.xautoclaim(
             settings.JOB_STREAM,
             settings.JOB_CONSUMER_GROUP,
             consumer,
-            min_idle_time=idle_ms,
+            min_idle_time=settings.JOB_STALE_IDLE_MS,
             start_id="0-0",
             count=10,
         )

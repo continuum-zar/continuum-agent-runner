@@ -47,6 +47,7 @@ Required env vars (see `.env.example`):
 | `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` | Same values as the API uses |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | App credentials so the runner can mint installation tokens locally |
 | `RUNNER_CONCURRENCY` | Worker tasks per process (default 2) |
+| `JOB_STALE_IDLE_MS` | How long a pending Redis stream job must be idle before another worker may reclaim it (default 1200000) |
 | `WORKSPACE_ROOT` | Directory for per-run workspaces (default `/work`) |
 
 ## Tools the agent has

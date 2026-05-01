@@ -69,7 +69,7 @@ On the existing `continuum-backend` service add:
 | `AGENT_RUNNER_HMAC_SECRET` | Same secret as on the runner |
 | `AGENT_RUNNER_DEFAULT_TIMEOUT_SECONDS` | `1200` (optional override) |
 
-The migration `a1b2c3d4e5f6_add_agent_runs_tables` runs automatically on the
+The migration `b2c3d4e5f6a7_add_agent_runs_tables` runs automatically on the
 next API deploy (the existing release process applies pending migrations).
 
 ## 5. Frontend (Vercel)
@@ -103,8 +103,8 @@ the backend is updated.
   `finally` block. If the runner OOM-kills mid-run, Railway recreates the
   container; old workspaces don't persist across restarts.
 - **Abandoned runs**: if the runner dies after it claimed a job from the
-  Redis stream, `xautoclaim` picks it back up after 60 s of idle time so the
-  job isn't lost.
+  Redis stream, `xautoclaim` picks it back up after `JOB_STALE_IDLE_MS`
+  (default 20 minutes) so live long-running jobs are not duplicated.
 - **Cost guardrails**: tweak `MAX_ITERATIONS`, `MAX_WALL_CLOCK_SECONDS`, and
   `MAX_TOKENS_PER_RUN` env vars on the runner.
 - **Cancelling**: clicking *Cancel run* in the drawer flips the DB row and

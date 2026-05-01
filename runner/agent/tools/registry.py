@@ -89,7 +89,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "grep_files",
             "description": (
                 "Search file contents with ripgrep and return compact path:line previews. "
-                "Use this to find symbols or relevant files before reading them."
+                "Use path and glob to scope searches, and avoid repeating the same broad "
+                "search before reading a concrete file."
             ),
             "parameters": {
                 "type": "object",
@@ -109,8 +110,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                     "max_matches": {
                         "type": "integer",
-                        "description": "Cap visible matches. Default 100.",
-                        "default": 100,
+                        "description": "Cap visible matches. Default 50, maximum 200.",
+                        "default": 50,
                     },
                 },
                 "required": ["pattern"],

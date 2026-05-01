@@ -19,6 +19,8 @@ _FALLBACK_MAX_FILES = 5_000
 _FALLBACK_MAX_FILE_BYTES = 1_000_000
 _BINARY_SAMPLE_BYTES = 2_048
 _MAX_LINE_COLUMNS = 240
+_DEFAULT_MAX_MATCHES = 50
+_MAX_MATCHES_CAP = 200
 
 
 async def handle(ctx: "RunContext", args: dict[str, Any]) -> str:
@@ -38,10 +40,10 @@ async def handle(ctx: "RunContext", args: dict[str, Any]) -> str:
         return f"[runner] path does not exist: {path!r}"
 
     try:
-        max_matches = int(args.get("max_matches", 100) or 100)
+        max_matches = int(args.get("max_matches", _DEFAULT_MAX_MATCHES) or _DEFAULT_MAX_MATCHES)
     except (TypeError, ValueError):
-        max_matches = 100
-    max_matches = max(1, min(max_matches, 500))
+        max_matches = _DEFAULT_MAX_MATCHES
+    max_matches = max(1, min(max_matches, _MAX_MATCHES_CAP))
 
     argv = [
         "rg",

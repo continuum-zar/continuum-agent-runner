@@ -36,13 +36,15 @@ class Settings(BaseSettings):
     # Hard guardrails
     MAX_ITERATIONS: int = 30
     MAX_WALL_CLOCK_SECONDS: int = 900
-    MAX_TOKENS_PER_RUN: int = 400_000
+    MAX_TOKENS_PER_RUN: int = 2_000_000
     MAX_FILE_BYTES: int = 200_000
     MAX_SHELL_OUTPUT_BYTES: int = 64_000
     MAX_SHELL_TIMEOUT_SECONDS: int = 600
     MAX_CONSECUTIVE_TOOL_FAILURES: int = 5
-    HISTORY_COMPACT_TOKEN_THRESHOLD: int = 60_000
-    HISTORY_KEEP_RECENT_TOOL_RESULTS: int = 4
+    MAX_REPEATED_TOOL_CALLS: int = 3
+    DUPLICATE_TOOL_RESULT_PREVIEW_CHARS: int = 240
+    HISTORY_COMPACT_TOKEN_THRESHOLD: int = 30_000
+    HISTORY_KEEP_RECENT_TOOL_RESULTS: int = 2
 
     # Stream / channel names (must match the API)
     JOB_STREAM: str = "continuum:agent:jobs"

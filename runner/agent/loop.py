@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from typing import Any
@@ -86,6 +87,37 @@ def _is_tool_exception_observation(observation: str) -> bool:
     return observation.startswith("[runner] tool ") and " raised:" in observation
 
 
+def _repeated_tool_call_observation() -> str:
+    return (
+        "[runner] repeated tool call skipped after "
+        f"{settings.MAX_REPEATED_TOOL_CALLS} identical calls; use a narrower "
+        "path/glob/pattern or read a specific file"
+    )
+
+
+def _dedupe_tool_observation(
+    *,
+    observation: str,
+    name: str,
+    raw_args: str,
+    seen_observations: dict[str, tuple[str, str]],
+) -> str:
+    digest = hashlib.sha256(observation.encode("utf-8", errors="replace")).hexdigest()
+    previous = seen_observations.get(digest)
+    if previous is None:
+        seen_observations[digest] = (name, raw_args[:160])
+        return observation
+
+    previous_name, previous_args = previous
+    preview_chars = max(0, settings.DUPLICATE_TOOL_RESULT_PREVIEW_CHARS)
+    preview = observation[:preview_chars].replace("\n", " ")
+    return (
+        f"[runner] duplicate {name} result omitted from history; identical to "
+        f"earlier {previous_name} result for {previous_args}. "
+        f"Preview: {preview}"
+    )
+
+
 def _compact_history_if_needed(messages: list[dict[str, Any]]) -> int:
     if _estimate_tokens(messages) <= settings.HISTORY_COMPACT_TOKEN_THRESHOLD:
         return 0
@@ -130,6 +162,10 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             "model": explore_model,
             "synthesize_model": synthesize_model,
             "max_iterations": settings.MAX_ITERATIONS,
+            "max_tokens_per_run": settings.MAX_TOKENS_PER_RUN,
+            "history_compact_token_threshold": settings.HISTORY_COMPACT_TOKEN_THRESHOLD,
+            "history_keep_recent_tool_results": settings.HISTORY_KEEP_RECENT_TOOL_RESULTS,
+            "max_repeated_tool_calls": settings.MAX_REPEATED_TOOL_CALLS,
         },
     )
 
@@ -139,6 +175,9 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     rate_limit_retries = 0
     last_failure_key: tuple[str, str] | None = None
     consecutive_tool_failures = 0
+    tool_call_counts: dict[tuple[str, str], int] = {}
+    seen_observations: dict[str, tuple[str, str]] = {}
+    token_budget_warning_emitted = False
 
     while True:
         if ctx.run_state.cancel_requested:
@@ -215,6 +254,20 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                 ctx.tokens_used += int(getattr(usage, "total_tokens", 0) or 0)
             except (TypeError, ValueError):
                 pass
+        if (
+            not token_budget_warning_emitted
+            and ctx.tokens_used >= int(settings.MAX_TOKENS_PER_RUN * 0.8)
+        ):
+            token_budget_warning_emitted = True
+            await ctx.events.emit(
+                "status",
+                {
+                    "phase": "token_budget_warning",
+                    "tokens_used": ctx.tokens_used,
+                    "max_tokens_per_run": settings.MAX_TOKENS_PER_RUN,
+                    "percent_used": 80,
+                },
+            )
 
         choice = resp.choices[0]
         msg = choice.message
@@ -272,7 +325,13 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                 "tool_call",
                 {"name": name, "args": format_user_visible_args(name, raw_args)},
             )
-            observation = await dispatch(ctx, name, raw_args)
+            tool_call_key = (name, raw_args)
+            tool_call_count = tool_call_counts.get(tool_call_key, 0) + 1
+            tool_call_counts[tool_call_key] = tool_call_count
+            if tool_call_count > settings.MAX_REPEATED_TOOL_CALLS:
+                observation = _repeated_tool_call_observation()
+            else:
+                observation = await dispatch(ctx, name, raw_args)
             await ctx.events.emit(
                 "tool_result",
                 {"name": name, "result_preview": observation[:1500]},
@@ -299,7 +358,12 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": observation,
+                    "content": _dedupe_tool_observation(
+                        observation=observation,
+                        name=name,
+                        raw_args=raw_args,
+                        seen_observations=seen_observations,
+                    ),
                 }
             )
             if error_msg or ctx.run_state.is_done:

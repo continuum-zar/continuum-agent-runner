@@ -9,6 +9,7 @@ RUN apt-get update \
         curl \
         git \
         jq \
+        ripgrep \
         build-essential \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \

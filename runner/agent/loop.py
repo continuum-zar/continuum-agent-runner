@@ -82,6 +82,10 @@ def _tool_call_lookup(messages: list[dict[str, Any]]) -> dict[str, tuple[str, st
     return lookup
 
 
+def _is_tool_exception_observation(observation: str) -> bool:
+    return observation.startswith("[runner] tool ") and " raised:" in observation
+
+
 def _compact_history_if_needed(messages: list[dict[str, Any]]) -> int:
     if _estimate_tokens(messages) <= settings.HISTORY_COMPACT_TOKEN_THRESHOLD:
         return 0
@@ -133,6 +137,8 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     final_message: str | None = None
     error_msg: str | None = None
     rate_limit_retries = 0
+    last_failure_key: tuple[str, str] | None = None
+    consecutive_tool_failures = 0
 
     while True:
         if ctx.run_state.cancel_requested:
@@ -271,6 +277,24 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                 "tool_result",
                 {"name": name, "result_preview": observation[:1500]},
             )
+
+            if _is_tool_exception_observation(observation):
+                failure_key = (name, raw_args)
+                if failure_key == last_failure_key:
+                    consecutive_tool_failures += 1
+                else:
+                    last_failure_key = failure_key
+                    consecutive_tool_failures = 1
+
+                if consecutive_tool_failures >= settings.MAX_CONSECUTIVE_TOOL_FAILURES:
+                    error_msg = (
+                        f"tool {name!r} failed {consecutive_tool_failures} times "
+                        f"in a row: {observation[:200]}"
+                    )
+            else:
+                last_failure_key = None
+                consecutive_tool_failures = 0
+
             messages.append(
                 {
                     "role": "tool",
@@ -278,9 +302,11 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                     "content": observation,
                 }
             )
-            if ctx.run_state.is_done:
+            if error_msg or ctx.run_state.is_done:
                 break
 
+        if error_msg:
+            break
         if ctx.run_state.is_done:
             break
 

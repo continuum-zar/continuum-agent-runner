@@ -1,0 +1,9 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Worker process — no HTTP port to health-check.
+startCommand = "python -m runner.main"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

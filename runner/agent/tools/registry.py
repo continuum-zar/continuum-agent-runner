@@ -11,7 +11,10 @@ from runner.agent.tools import (  # noqa: E402  (registered as side effect)
     done as _done,
     git_diff as _git_diff,
     git_status as _git_status,
+    glob_files as _glob_files,
+    grep_files as _grep_files,
     list_dir as _list_dir,
+    read_many_files as _read_many_files,
     read_file as _read_file,
     run_shell as _run_shell,
     write_file as _write_file,
@@ -57,10 +60,73 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "glob_files",
+            "description": (
+                "Find tracked files by glob pattern using git's file list. "
+                "Use this before reading files when you know a filename pattern."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Git glob pathspec, e.g. '**/*.tsx' or 'src/**/Task*.ts'.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Cap returned paths. Default 200.",
+                        "default": 200,
+                    },
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_files",
+            "description": (
+                "Search file contents with ripgrep and return compact path:line previews. "
+                "Use this to find symbols or relevant files before reading them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Ripgrep regex pattern to search for.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file or directory to search. Default '.'.",
+                        "default": ".",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional ripgrep glob filter, e.g. '*.tsx'.",
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Cap visible matches. Default 100.",
+                        "default": 100,
+                    },
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
-                "Read a UTF-8 text file inside the workspace. Files larger than "
-                "the configured cap are truncated."
+                "Read a UTF-8 text file inside the workspace. Always read the whole file "
+                "in a single call (cap 200 KB) unless it is genuinely too large. "
+                "Do NOT paginate with start_line/end_line for files under the cap. "
+                "Prefer read_many_files when you need several files."
             ),
             "parameters": {
                 "type": "object",
@@ -76,6 +142,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_many_files",
+            "description": (
+                "Read several UTF-8 text files in one tool call. Prefer this over "
+                "multiple read_file calls when exploring related files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Workspace-relative file paths to read.",
+                    },
+                    "max_bytes_each": {
+                        "type": "integer",
+                        "description": "Per-file byte cap. Default 50000.",
+                        "default": 50000,
+                    },
+                },
+                "required": ["paths"],
                 "additionalProperties": False,
             },
         },
@@ -229,7 +322,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 _HANDLERS: dict[str, Handler] = {
     "list_dir": _list_dir.handle,
+    "glob_files": _glob_files.handle,
+    "grep_files": _grep_files.handle,
     "read_file": _read_file.handle,
+    "read_many_files": _read_many_files.handle,
     "write_file": _write_file.handle,
     "apply_patch": _apply_patch.handle,
     "run_shell": _run_shell.handle,

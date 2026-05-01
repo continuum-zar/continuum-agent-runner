@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_PROVIDER: str = "openai"
     LLM_MODEL: str = "gpt-4.1"
+    LLM_EXPLORE_MODEL: str = "gpt-4.1-mini"
+    LLM_SYNTHESIZE_MODEL: str = "gpt-4.1"
+    LLM_SYNTHESIZE_TOOLS: str = "write_file,apply_patch,commit_and_push,done"
 
     # GitHub App credentials (the runner mints installation tokens locally
     # to avoid round-tripping the API on every clone).
@@ -37,6 +40,8 @@ class Settings(BaseSettings):
     MAX_FILE_BYTES: int = 200_000
     MAX_SHELL_OUTPUT_BYTES: int = 64_000
     MAX_SHELL_TIMEOUT_SECONDS: int = 600
+    HISTORY_COMPACT_TOKEN_THRESHOLD: int = 60_000
+    HISTORY_KEEP_RECENT_TOOL_RESULTS: int = 4
 
     # Stream / channel names (must match the API)
     JOB_STREAM: str = "continuum:agent:jobs"

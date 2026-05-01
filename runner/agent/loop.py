@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from typing import Any
 
 import litellm
+from litellm.exceptions import RateLimitError
 
 from runner.agent.context import RunContext
 from runner.agent.prompts import build_initial_messages
@@ -23,9 +25,9 @@ litellm.drop_params = True
 litellm.suppress_debug_info = True
 
 
-def _model_id() -> str:
+def _model_id(model_name: str | None = None) -> str:
     provider = (settings.LLM_PROVIDER or "openai").strip().lower()
-    model = settings.LLM_MODEL.strip()
+    model = (model_name or settings.LLM_MODEL).strip()
     if provider in ("openai", "azure", ""):
         return model
     # LiteLLM expects e.g. "anthropic/claude-3-5-sonnet" for non-OpenAI.
@@ -40,6 +42,70 @@ def _api_key_kwargs() -> dict[str, str]:
     return {"api_key": settings.LLM_API_KEY}
 
 
+def _csv_set(value: str) -> set[str]:
+    return {part.strip() for part in value.split(",") if part.strip()}
+
+
+def _message_content_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    # Good enough for compaction thresholds; avoids provider tokenizer costs.
+    chars = 0
+    for message in messages:
+        chars += len(_message_content_text(message))
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            chars += len(str(tool_calls))
+    return chars // 4
+
+
+def _tool_call_lookup(messages: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    lookup: dict[str, tuple[str, str]] = {}
+    for message in messages:
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_call_id = tool_call.get("id")
+            function = tool_call.get("function") or {}
+            if not isinstance(tool_call_id, str) or not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "tool")
+            args = str(function.get("arguments") or "{}")
+            lookup[tool_call_id] = (name, args[:160])
+    return lookup
+
+
+def _compact_history_if_needed(messages: list[dict[str, Any]]) -> int:
+    if _estimate_tokens(messages) <= settings.HISTORY_COMPACT_TOKEN_THRESHOLD:
+        return 0
+
+    tool_indices = [i for i, message in enumerate(messages) if message.get("role") == "tool"]
+    keep_recent = max(0, settings.HISTORY_KEEP_RECENT_TOOL_RESULTS)
+    compactable = set(tool_indices[:-keep_recent] if keep_recent else tool_indices)
+    lookup = _tool_call_lookup(messages)
+
+    compacted = 0
+    for i in sorted(compactable):
+        content = _message_content_text(messages[i])
+        if len(content) <= 1024 or content.startswith("[runner] [compacted earlier"):
+            continue
+        tool_call_id = messages[i].get("tool_call_id")
+        tool_name, args_preview = lookup.get(str(tool_call_id), ("tool", "{}"))
+        messages[i]["content"] = (
+            f"[runner] [compacted earlier {tool_name} result for {args_preview}; "
+            "re-run the tool if you still need the contents]"
+        )
+        compacted += 1
+    return compacted
+
+
 async def run_agent(ctx: RunContext) -> AgentRunResult:
     """
     Drive the agent until it calls `done`, hits the iteration cap, runs out of
@@ -48,16 +114,25 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     messages: list[dict[str, Any]] = build_initial_messages(ctx)
 
     deadline = time.monotonic() + settings.MAX_WALL_CLOCK_SECONDS
-    model = _model_id()
+    explore_model = _model_id(settings.LLM_EXPLORE_MODEL or settings.LLM_MODEL)
+    synthesize_model = _model_id(settings.LLM_SYNTHESIZE_MODEL or settings.LLM_MODEL)
+    synthesize_tools = _csv_set(settings.LLM_SYNTHESIZE_TOOLS)
+    mode = "explore"
 
     await ctx.events.emit(
         "status",
-        {"phase": "agent_loop_started", "model": model, "max_iterations": settings.MAX_ITERATIONS},
+        {
+            "phase": "agent_loop_started",
+            "model": explore_model,
+            "synthesize_model": synthesize_model,
+            "max_iterations": settings.MAX_ITERATIONS,
+        },
     )
 
     iterations = 0
     final_message: str | None = None
     error_msg: str | None = None
+    rate_limit_retries = 0
 
     while True:
         if ctx.run_state.cancel_requested:
@@ -78,14 +153,26 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             error_msg = f"token budget exceeded ({settings.MAX_TOKENS_PER_RUN})"
             break
 
-        iterations += 1
-        ctx.iterations = iterations
-        await ctx.events.emit("thinking", {"step": iterations})
+        current_model = synthesize_model if mode == "synthesize" else explore_model
+        step = iterations + 1
+        ctx.iterations = step
+        await ctx.events.emit("thinking", {"step": step, "model": current_model, "mode": mode})
+
+        compacted = _compact_history_if_needed(messages)
+        if compacted:
+            await ctx.events.emit(
+                "status",
+                {
+                    "phase": "history_compacted",
+                    "compacted_tool_results": compacted,
+                    "estimated_tokens": _estimate_tokens(messages),
+                },
+            )
 
         try:
             resp = await asyncio.wait_for(
                 litellm.acompletion(
-                    model=model,
+                    model=current_model,
                     messages=messages,
                     tools=TOOL_SCHEMAS,
                     tool_choice="auto",
@@ -97,9 +184,24 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
         except asyncio.TimeoutError:
             error_msg = "LLM call timed out (180s)"
             break
+        except RateLimitError as exc:
+            backoff = min(60.0, 5.0 * (2**rate_limit_retries)) + random.uniform(0, 5)
+            rate_limit_retries += 1
+            if rate_limit_retries > 3:
+                error_msg = f"LLM rate-limited after retries: {exc}"
+                break
+            await ctx.events.emit(
+                "status",
+                {"phase": "rate_limited_backoff", "seconds": round(backoff, 2)},
+            )
+            await asyncio.sleep(backoff)
+            continue
         except Exception as exc:  # noqa: BLE001
             error_msg = f"LLM call raised: {type(exc).__name__}: {exc}"
             break
+
+        iterations = step
+        rate_limit_retries = 0
 
         usage = getattr(resp, "usage", None)
         if usage is not None:
@@ -117,6 +219,9 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
         }
         tool_calls = getattr(msg, "tool_calls", None) or []
         if tool_calls:
+            tool_names = {tc.function.name for tc in tool_calls}
+            if mode == "explore" and tool_names.intersection(synthesize_tools):
+                mode = "synthesize"
             msg_dict["tool_calls"] = [
                 {
                     "id": tc.id,

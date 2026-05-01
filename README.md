@@ -45,17 +45,24 @@ Required env vars (see `.env.example`):
 | `BACKEND_URL` | Continuum API public URL, e.g. `https://api.continuumapp.co.za` |
 | `AGENT_RUNNER_HMAC_SECRET` | Shared secret for HMAC-signed callbacks to the API |
 | `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` | Same values as the API uses |
+| `LLM_EXPLORE_MODEL`, `LLM_SYNTHESIZE_MODEL` | Route cheap search/read turns to a high-limit model and write/commit turns to the stronger model |
+| `LLM_SYNTHESIZE_TOOLS` | Comma-separated tool names that permanently switch the run from explore to synthesize mode |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | App credentials so the runner can mint installation tokens locally |
 | `RUNNER_CONCURRENCY` | Worker tasks per process (default 2) |
 | `JOB_STALE_IDLE_MS` | How long a pending Redis stream job must be idle before another worker may reclaim it (default 1200000) |
 | `WORKSPACE_ROOT` | Directory for per-run workspaces (default `/work`) |
+| `HISTORY_COMPACT_TOKEN_THRESHOLD` | Estimated-token threshold before old large tool results are compacted (default 60000) |
+| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | Recent tool results to keep verbatim during compaction (default 4) |
 
 ## Tools the agent has
 
 | tool | purpose |
 |------|---------|
 | `list_dir` | List files in a directory inside the workspace |
+| `glob_files` | Find tracked files by glob pattern |
+| `grep_files` | Search file contents with ripgrep |
 | `read_file` | Read a file (capped at 200 KB) |
+| `read_many_files` | Read several files in one tool call |
 | `write_file` | Write or overwrite a file |
 | `apply_patch` | Apply a unified diff |
 | `run_shell` | Run an allow-listed shell command |

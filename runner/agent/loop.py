@@ -93,6 +93,14 @@ def _is_loop_warning_observation(observation: str) -> bool:
     )
 
 
+def _is_stagnation_observation(observation: str) -> bool:
+    if _is_loop_warning_observation(observation):
+        return True
+    return observation.startswith("[runner] no matches") or observation.startswith(
+        "[runner] path does not exist:"
+    ) or observation.startswith("[runner] file does not exist:")
+
+
 def _repeated_tool_call_observation(name: str, raw_args: str) -> str:
     args_preview = raw_args[:160]
     return (
@@ -191,6 +199,13 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     seen_observations: dict[str, tuple[str, str]] = {}
     token_budget_warning_emitted = False
     loop_warning_nudge_emitted = False
+    stagnation_nudge_emitted = False
+    stagnation_steps = 0
+    stagnation_last_tool_name = ""
+    stagnation_last_tool_args = ""
+    stagnation_rescue_threshold = 6
+    stagnation_fail_threshold = 9
+    progress_tools = {"write_file", "apply_patch", "commit_and_push", "done"}
 
     while True:
         if ctx.run_state.cancel_requested:
@@ -352,6 +367,7 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
 
             is_loop_warning = _is_loop_warning_observation(observation)
             is_failure_like = _is_tool_exception_observation(observation) or is_loop_warning
+            is_stagnation_signal = _is_stagnation_observation(observation)
 
             if is_failure_like:
                 failure_key = (name, raw_args)
@@ -375,6 +391,19 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             else:
                 last_failure_key = None
                 consecutive_tool_failures = 0
+
+            if name in progress_tools and not observation.startswith("[runner] "):
+                stagnation_steps = 0
+                stagnation_last_tool_name = ""
+                stagnation_last_tool_args = ""
+            elif is_stagnation_signal:
+                stagnation_steps += 1
+                stagnation_last_tool_name = name
+                stagnation_last_tool_args = raw_args[:160]
+            else:
+                stagnation_steps = 0
+                stagnation_last_tool_name = ""
+                stagnation_last_tool_args = ""
 
             messages.append(
                 {
@@ -400,6 +429,29 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                             "glob_files/read_file, or call `done` with what you found."
                         ),
                     }
+                )
+            if (
+                stagnation_steps >= stagnation_rescue_threshold
+                and not stagnation_nudge_emitted
+                and not error_msg
+            ):
+                stagnation_nudge_emitted = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Stagnation warning: multiple no-progress tool results were observed "
+                            f"({stagnation_steps} in a row; latest tool={stagnation_last_tool_name}, "
+                            f"args={stagnation_last_tool_args}). Pivot now: narrow path/glob, switch "
+                            "tools, read a concrete file, or call `done` with a clear limitation summary."
+                        ),
+                    }
+                )
+            if stagnation_steps >= stagnation_fail_threshold and not error_msg:
+                error_msg = (
+                    "agent stuck: no-progress tool results persisted "
+                    f"for {stagnation_steps} steps (latest tool={stagnation_last_tool_name}, "
+                    f"args={stagnation_last_tool_args})"
                 )
             if error_msg or ctx.run_state.is_done:
                 break

@@ -48,6 +48,8 @@ If a tool result starts with `[runner] repeated tool call skipped` or
 tool (try `glob_files` for filenames, `list_dir` for shape, or `read_file` on
 a specific path), narrow searches with path/glob, or call `done` with what you
 have.
+If you see repeated `[runner] no matches` or missing path/file messages, treat
+that as stagnation: pivot immediately to a narrower strategy or call `done`.
 """
 
 

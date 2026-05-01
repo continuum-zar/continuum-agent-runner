@@ -87,11 +87,20 @@ def _is_tool_exception_observation(observation: str) -> bool:
     return observation.startswith("[runner] tool ") and " raised:" in observation
 
 
-def _repeated_tool_call_observation() -> str:
+def _is_loop_warning_observation(observation: str) -> bool:
+    return observation.startswith("[runner] repeated tool call skipped") or observation.startswith(
+        "[runner] duplicate "
+    )
+
+
+def _repeated_tool_call_observation(name: str, raw_args: str) -> str:
+    args_preview = raw_args[:160]
     return (
         "[runner] repeated tool call skipped after "
         f"{settings.MAX_REPEATED_TOOL_CALLS} identical calls; use a narrower "
-        "path/glob/pattern or read a specific file"
+        f"path/glob/pattern. Offending call: {name} {args_preview}. "
+        "Pivot now: use glob_files for filename patterns, use read_file with a concrete path, "
+        "or call done with a clear 'could not proceed' summary."
     )
 
 
@@ -102,6 +111,9 @@ def _dedupe_tool_observation(
     raw_args: str,
     seen_observations: dict[str, tuple[str, str]],
 ) -> str:
+    if observation.startswith("[runner] "):
+        return observation
+
     digest = hashlib.sha256(observation.encode("utf-8", errors="replace")).hexdigest()
     previous = seen_observations.get(digest)
     if previous is None:
@@ -178,6 +190,7 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     tool_call_counts: dict[tuple[str, str], int] = {}
     seen_observations: dict[str, tuple[str, str]] = {}
     token_budget_warning_emitted = False
+    loop_warning_nudge_emitted = False
 
     while True:
         if ctx.run_state.cancel_requested:
@@ -329,7 +342,7 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             tool_call_count = tool_call_counts.get(tool_call_key, 0) + 1
             tool_call_counts[tool_call_key] = tool_call_count
             if tool_call_count > settings.MAX_REPEATED_TOOL_CALLS:
-                observation = _repeated_tool_call_observation()
+                observation = _repeated_tool_call_observation(name, raw_args)
             else:
                 observation = await dispatch(ctx, name, raw_args)
             await ctx.events.emit(
@@ -337,7 +350,10 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                 {"name": name, "result_preview": observation[:1500]},
             )
 
-            if _is_tool_exception_observation(observation):
+            is_loop_warning = _is_loop_warning_observation(observation)
+            is_failure_like = _is_tool_exception_observation(observation) or is_loop_warning
+
+            if is_failure_like:
                 failure_key = (name, raw_args)
                 if failure_key == last_failure_key:
                     consecutive_tool_failures += 1
@@ -346,10 +362,16 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                     consecutive_tool_failures = 1
 
                 if consecutive_tool_failures >= settings.MAX_CONSECUTIVE_TOOL_FAILURES:
-                    error_msg = (
-                        f"tool {name!r} failed {consecutive_tool_failures} times "
-                        f"in a row: {observation[:200]}"
-                    )
+                    if is_loop_warning:
+                        error_msg = (
+                            "agent stuck: repeated identical tool call to "
+                            f"{name!r} {consecutive_tool_failures} times in a row"
+                        )
+                    else:
+                        error_msg = (
+                            f"tool {name!r} failed {consecutive_tool_failures} times "
+                            f"in a row: {observation[:200]}"
+                        )
             else:
                 last_failure_key = None
                 consecutive_tool_failures = 0
@@ -366,6 +388,19 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
                     ),
                 }
             )
+            if is_loop_warning and not loop_warning_nudge_emitted:
+                loop_warning_nudge_emitted = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Loop warning: you repeated the same tool call and the runner skipped it "
+                            f"(tool={name}, args={raw_args[:160]}). Do not retry it. "
+                            "Pivot to a narrower path/glob, switch to a different tool like "
+                            "glob_files/read_file, or call `done` with what you found."
+                        ),
+                    }
+                )
             if error_msg or ctx.run_state.is_done:
                 break
 

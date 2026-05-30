@@ -21,12 +21,23 @@ logger = get_logger(__name__)
 # We accept a single command (the leading argv[0]) from this set. ``bash -lc``
 # is allowed so the agent can express compound commands, but the body of the
 # bash invocation is then re-validated against ``_DENY_RE`` to block obvious
-# foot-guns. This is a defense-in-depth layer; the primary isolation is the
-# per-run container + ephemeral workspace.
+# foot-guns.
+#
+# IMPORTANT: this list is a *speed-bump*, not a sandbox. The runner ships as a
+# single Docker container shared across concurrent runs (no gVisor / seccomp
+# per run), and we deliberately allow language runtimes (``python``, ``node``,
+# ``pip``, ``npm`` …) so the agent can install deps and run tests — which
+# means an adversarial agent can execute arbitrary code regardless of what
+# this allow-list contains. The list exists to (a) reject obvious LLM
+# goof-ups before they hit the shell, and (b) give a clear "policy violation"
+# error the model can react to.
+#
+# See ``README.md`` → "Sandbox & security model" for the threat model and the
+# rationale behind each retained command.
 
 _ALLOWED_CMDS: frozenset[str] = frozenset(
     {
-        # General Unix
+        # General Unix — read/inspect
         "ls",
         "cat",
         "head",
@@ -48,7 +59,8 @@ _ALLOWED_CMDS: frozenset[str] = frozenset(
         "sed",
         "awk",
         "tr",
-        "tee",
+        # File mutation (workspace-relative paths only — enforced by
+        # ``_ABSOLUTE_PATH_GUARD_CMDS`` below)
         "cp",
         "mv",
         "mkdir",
@@ -59,10 +71,15 @@ _ALLOWED_CMDS: frozenset[str] = frozenset(
         "basename",
         "dirname",
         "realpath",
+        # Env inspection — only as a prefix to a child command (``env FOO=1
+        # cmd``); the deny regex blocks a bare ``env`` / ``printenv`` that
+        # would dump the runner's secrets.
         "env",
         "printenv",
         "date",
-        "yes",
+        # Archive tools — needed for some build steps. Note: ``curl``/``wget``
+        # remain denied so these can only repack workspace contents, not
+        # exfiltrate over the network directly.
         "tar",
         "zip",
         "unzip",
@@ -70,9 +87,11 @@ _ALLOWED_CMDS: frozenset[str] = frozenset(
         "gunzip",
         "jq",
         "xargs",
-        "less",
-        "more",
         "tree",
+        # Dropped from the allow-list (see git history): ``yes`` (output
+        # flooder, no agent use-case), ``tee`` (write_file tool covers writes
+        # and ``tee /etc/...`` is the classic privilege-escalation vector),
+        # ``less`` / ``more`` (interactive pagers hang on non-TTY pipes).
         # Git
         "git",
         # Python
@@ -115,38 +134,135 @@ _ALLOWED_CMDS: frozenset[str] = frozenset(
 )
 
 
+# Patterns that should NEVER appear anywhere in the command line, regardless
+# of which allow-listed program is invoking them. Three rough buckets:
+#   1. Network egress / remote shells (curl, wget, ssh, …) — the agent has no
+#      need to reach the internet via shell; ``git`` and ``pip`` go through
+#      their own configured endpoints.
+#   2. Host/privilege mutation (sudo, mount, chown, useradd, systemctl, …) —
+#      the runner runs as a non-root user inside its container, but these
+#      have no agent use-case and indicate something is very wrong if they
+#      show up.
+#   3. Reverse-shell / secret-exfil signatures (``/dev/tcp/``, ``bash -i``,
+#      ``mkfifo``, bare ``env``/``printenv``, ``/proc/.../environ``, …) —
+#      these are the patterns an attacker-controlled prompt would use to dump
+#      the container's secret env vars or open an outbound shell.
 _DENY_RE = re.compile(
     r"""
-    (^|[^a-zA-Z])(
+    (?:^|[^a-zA-Z0-9._/-])(
+        # --- network egress / remote shells ---
         sudo
       | su\s
       | curl
       | wget
       | nc\b
       | ncat
+      | netcat
       | ssh\b
       | scp\b
       | sftp\b
       | rsync\b
       | telnet
       | ftp\b
+      | socat
       | docker
       | kubectl
+      | helm\b
+      # --- host / privilege mutation ---
       | dd\b
       | mkfs\.
       | shutdown
       | reboot
       | halt
+      | poweroff
       | iptables
+      | nft\b
       | ufw\b
       | systemctl
-      | service\b
+      # SysV "service NAME ACTION" — narrowed so the word "service" in a
+      # commit message or grep pattern doesn't false-positive.
+      | service\s+[A-Za-z0-9_-]+\s+(?:start|stop|restart|reload|status|enable|disable)\b
+      | mount\b
+      | umount\b
+      | chown\b
+      | useradd
+      | usermod
+      | userdel
+      | groupadd
+      | groupmod
+      | groupdel
+      | passwd\b
+      | crontab\b
+      # setuid / setgid bit on chmod (numeric or symbolic)
+      | chmod\s+(?:[0-7]?[2-7]\d{3}|[ugoa]*[+-]s)
+      # --- shell-internal escapes ---
+      # ``eval`` / ``exec`` of arbitrary strings, sourcing arbitrary files,
+      # interactive bash spawns
+      | eval\s
+      | exec\s+(?:bash|sh|python|node)
+      | source\s
+      | \.\s+/
+      | bash\s+-i\b
+      | sh\s+-i\b
+      # --- reverse shell / pipe-fd tricks ---
+      | /dev/tcp/
+      | /dev/udp/
+      | mkfifo\b
+      # --- secret-bearing files / env dumps ---
+      | /proc/[^\s]*/environ
+      | /etc/shadow\b
+      | /etc/sudoers
+      | (?:^|/)\.ssh/
+      | (?:^|/)\.aws/credentials
+      | (?:^|/)\.netrc\b
+      | (?:^|/)\.git-credentials\b
     )
     """,
     re.VERBOSE | re.IGNORECASE,
 )
 
-_RM_RF_ROOT_RE = re.compile(r"\brm\b[^|;&]*\s-[a-zA-Z]*[rR][a-zA-Z]*[fF]?[a-zA-Z]*\s+/\s")
+# Bare ``env`` / ``printenv`` (no args, or only piped/redirected to another
+# command) dumps the runner's process env, which contains the LLM API key,
+# the HMAC secret, the GitHub App private key, and clone tokens. Block that
+# specific shape while still allowing ``env FOO=bar cmd …`` (env-as-prefix)
+# and ``printenv FOO`` (single-var lookup).
+_ENV_DUMP_RE = re.compile(
+    r"""
+    (?:^|[;&|]\s*)            # start of line or after a pipe/sep
+    (?:env|printenv)
+    \s*
+    (?:$|[|>;&])              # nothing after, or only redirection
+    """,
+    re.VERBOSE,
+)
+
+# Reject ``rm -rf <absolute-path>`` and ``rm -rf ~`` / ``rm -rf $HOME``. The
+# previous version only caught the literal ``rm -rf /`` with surrounding
+# whitespace, so ``rm -rf /etc`` and ``rm -rf /*`` slipped through.
+_RM_RF_ABSOLUTE_RE = re.compile(
+    r"""
+    \brm\b
+    [^|;&]*                    # any flags/args up to the next separator
+    \s-[a-zA-Z]*[rR][a-zA-Z]*  # the -r/-R flag (alongside -f, -i, …)
+    [^|;&]*?
+    \s
+    (?:                        # the target path:
+        /                      #   any absolute path
+      | ~                      #   $HOME shorthand
+      | \$HOME\b
+      | \$\{HOME\}
+    )
+    """,
+    re.VERBOSE,
+)
+
+# argv[0] commands whose path arguments must stay inside the workspace. We
+# enforce this by rejecting any argument that *starts* with ``/`` or ``~``
+# (absolute path / home-relative). Workspace-relative paths are unaffected,
+# and ``--flag=value`` style args are skipped.
+_ABSOLUTE_PATH_GUARD_CMDS: frozenset[str] = frozenset(
+    {"rm", "rmdir", "cp", "mv", "ln", "mkdir", "touch", "chmod"}
+)
 
 
 class ShellPolicyError(Exception):
@@ -189,6 +305,41 @@ def _strip_env(env_overrides: dict[str, str] | None = None) -> dict[str, str]:
     return pruned
 
 
+def _check_string(text: str, *, where: str) -> None:
+    """Apply every deny pattern to a single command-line string."""
+    if _DENY_RE.search(text):
+        raise ShellPolicyError(f"{where} contains a denied pattern")
+    if _ENV_DUMP_RE.search(text):
+        raise ShellPolicyError(
+            f"{where} would dump the runner's environment (secrets) — "
+            "use ``printenv FOO`` for a specific variable instead"
+        )
+    if _RM_RF_ABSOLUTE_RE.search(" " + text + " "):
+        raise ShellPolicyError(
+            f"{where} contains 'rm -rf' against an absolute path or $HOME"
+        )
+
+
+def _check_absolute_path_args(cmd: str, args: Sequence[str]) -> None:
+    """For destructive file commands, reject absolute / home-relative paths.
+
+    The agent's cwd is the workspace root; absolute paths can otherwise reach
+    the container's filesystem (other runs' workspaces, /etc, /root, …). Flag
+    values like ``--target=/foo`` are ignored — the agent passes paths as
+    positional args in practice.
+    """
+    if cmd not in _ABSOLUTE_PATH_GUARD_CMDS:
+        return
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        if arg.startswith("/") or arg.startswith("~"):
+            raise ShellPolicyError(
+                f"{cmd!r} argument {arg!r} is outside the workspace; "
+                "use a workspace-relative path"
+            )
+
+
 def validate_command(argv: Sequence[str]) -> None:
     """
     Raise ``ShellPolicyError`` if ``argv`` is outside the allow-list or contains
@@ -206,20 +357,17 @@ def validate_command(argv: Sequence[str]) -> None:
     if base_head not in _ALLOWED_CMDS:
         raise ShellPolicyError(f"command not in allow-list: {base_head!r}")
 
+    _check_absolute_path_args(base_head, argv[1:])
+
     joined = " ".join(shlex.quote(a) for a in argv)
-    if _DENY_RE.search(joined):
-        raise ShellPolicyError(f"command contains a denied pattern: {joined[:200]!r}")
-    if _RM_RF_ROOT_RE.search(" " + joined + " "):
-        raise ShellPolicyError("'rm -rf /' style command rejected")
+    _check_string(joined, where="command")
 
     # Special-case ``bash -lc "..."`` and ``sh -c "..."`` — the body must also
-    # pass the deny regex. The agent often needs piped commands.
+    # pass every deny check. The agent often needs piped commands, so we have
+    # to re-validate the inner string with the same rules.
     if base_head in ("bash", "sh") and len(argv) >= 2 and argv[1] in ("-c", "-lc"):
         body = argv[2] if len(argv) >= 3 else ""
-        if _DENY_RE.search(body):
-            raise ShellPolicyError("shell -c body contains a denied pattern")
-        if _RM_RF_ROOT_RE.search(" " + body + " "):
-            raise ShellPolicyError("shell -c body contains 'rm -rf /'")
+        _check_string(body, where="shell -c body")
 
 
 async def run_shell_capped(

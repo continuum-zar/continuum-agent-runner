@@ -15,8 +15,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# pnpm + yarn for repos that prefer them
-RUN npm install -g pnpm@9 yarn@1
+# pnpm + yarn for repos that prefer them, plus the Codex CLI which drives the agent loop.
+RUN npm install -g pnpm@9 yarn@1 @openai/codex
 
 WORKDIR /app
 

@@ -9,8 +9,8 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 
+from runner.agent.codex_runner import run_agent
 from runner.agent.context import RunContext, RunState
-from runner.agent.loop import run_agent
 from runner.backend_client import BackendClient
 from runner.config import settings
 from runner.events import EventPublisher

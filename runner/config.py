@@ -17,10 +17,14 @@ class Settings(BaseSettings):
     # LLM
     LLM_API_KEY: str = ""
     LLM_PROVIDER: str = "openai"
-    LLM_MODEL: str = "gpt-4.1"
-    LLM_EXPLORE_MODEL: str = "gpt-4.1-mini"
-    LLM_SYNTHESIZE_MODEL: str = "gpt-4.1"
-    LLM_SYNTHESIZE_TOOLS: str = "write_file,apply_patch,commit_and_push,done"
+    LLM_MODEL: str = "gpt-5-codex"
+
+    # Codex CLI
+    CODEX_BIN: str = "codex"
+    # workspace-write uses bwrap, which fails on hosts that restrict unprivileged
+    # user namespaces. The runner already isolates each job in its own dir, so
+    # danger-full-access is the right default here.
+    CODEX_SANDBOX: str = "danger-full-access"
 
     # GitHub App credentials (the runner mints installation tokens locally
     # to avoid round-tripping the API on every clone).
@@ -34,17 +38,10 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # Hard guardrails
-    MAX_ITERATIONS: int = 30
     MAX_WALL_CLOCK_SECONDS: int = 900
     MAX_TOKENS_PER_RUN: int = 2_000_000
-    MAX_FILE_BYTES: int = 200_000
     MAX_SHELL_OUTPUT_BYTES: int = 64_000
     MAX_SHELL_TIMEOUT_SECONDS: int = 600
-    MAX_CONSECUTIVE_TOOL_FAILURES: int = 5
-    MAX_REPEATED_TOOL_CALLS: int = 3
-    DUPLICATE_TOOL_RESULT_PREVIEW_CHARS: int = 240
-    HISTORY_COMPACT_TOKEN_THRESHOLD: int = 30_000
-    HISTORY_KEEP_RECENT_TOOL_RESULTS: int = 2
 
     # Stream / channel names (must match the API)
     JOB_STREAM: str = "continuum:agent:jobs"

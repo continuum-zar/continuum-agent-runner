@@ -25,10 +25,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY runner /app/runner
 COPY README.md /app/README.md
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-# Per-run workspaces live here (override with WORKSPACE_ROOT)
-RUN mkdir -p /work
+# Per-run workspaces live here (override with WORKSPACE_ROOT) and Codex needs
+# its config dir to exist before first use.
+RUN mkdir -p /work /root/.codex
 ENV WORKSPACE_ROOT=/work
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "runner.main"]
+CMD ["/app/entrypoint.sh"]

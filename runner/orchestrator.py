@@ -83,6 +83,18 @@ async def process_job(
         await backend.update_status(job.run_id, "running")
         await publisher.emit("status", {"phase": "started", "run_id": job.run_id})
 
+        # ---- 0. Fetch seed context if the job didn't carry it ------------
+        # The API no longer embeds the (potentially large) context in the Redis
+        # job to keep the stream slim (Phase 2c). Fetch it on demand. Backward
+        # compatible: older API payloads still include `context`, in which case
+        # this is skipped. A fetch failure is non-fatal — context is best-effort.
+        if not job.context:
+            try:
+                job.context = await backend.fetch_run_context(job.run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("context.fetch_failed", run_id=job.run_id, error=str(exc))
+                job.context = {}
+
         # ---- 1. Get a GitHub installation token --------------------------
         await publisher.emit("status", {"phase": "fetching_github_token"})
         try:

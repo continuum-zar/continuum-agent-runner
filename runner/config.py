@@ -33,13 +33,25 @@ class Settings(BaseSettings):
 
     # Worker tuning
     RUNNER_CONCURRENCY: int = 2
-    JOB_STALE_IDLE_MS: int = 1_200_000
+    # Must stay comfortably ABOVE MAX_WALL_CLOCK_SECONDS: a job's stream message
+    # is only xack'd after it finishes, so any run still going past this idle
+    # window gets reclaimed and re-executed by another worker. Kept ~10min above
+    # the wall-clock ceiling below.
+    JOB_STALE_IDLE_MS: int = 15_000_000  # ~4h10m
     WORKSPACE_ROOT: str = "/work"
     LOG_LEVEL: str = "INFO"
 
     # Hard guardrails
-    MAX_WALL_CLOCK_SECONDS: int = 900
+    # Wall-clock ceiling for a single run. Large tasks can legitimately take a
+    # long time, so this is generous; it only exists to reap runs that are truly
+    # stuck. Raise via env (MAX_WALL_CLOCK_SECONDS) if you need even longer, and
+    # bump JOB_STALE_IDLE_MS to stay above it.
+    MAX_WALL_CLOCK_SECONDS: int = 14_400  # 4h
+    # Token budget you can afford per run. Tokens are only reported after each
+    # turn completes, so the run is killed at (cap - headroom) to leave room for
+    # one more turn's worth of tokens before it crosses the real ceiling.
     MAX_TOKENS_PER_RUN: int = 2_000_000
+    TOKEN_BUDGET_HEADROOM: int = 200_000
     MAX_SHELL_OUTPUT_BYTES: int = 64_000
     MAX_SHELL_TIMEOUT_SECONDS: int = 600
 

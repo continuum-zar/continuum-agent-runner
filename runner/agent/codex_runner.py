@@ -367,6 +367,10 @@ def _pr_body(ctx: RunContext, summary: str) -> str:
 
 async def run_agent(ctx: RunContext) -> AgentRunResult:
     deadline = time.monotonic() + settings.MAX_WALL_CLOCK_SECONDS
+    # Kill below the real cap so a one-turn overshoot still lands under budget.
+    token_kill_threshold = max(
+        0, settings.MAX_TOKENS_PER_RUN - settings.TOKEN_BUDGET_HEADROOM
+    )
     prompt = _build_codex_prompt(ctx)
 
     await ctx.events.emit(
@@ -411,6 +415,23 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             maybe_text = await _handle_codex_event(ctx, evt)
             if maybe_text:
                 last_summary = maybe_text
+
+            # Token budget guard. ctx.tokens_used is updated on every
+            # turn.completed event above; reap the run once it crosses the
+            # headroom-adjusted threshold so a runaway task can't burn unbounded
+            # spend and a final turn can't blow past the real cap.
+            if ctx.tokens_used > token_kill_threshold:
+                error_msg = (
+                    f"token budget exceeded ({ctx.tokens_used} tokens > "
+                    f"{token_kill_threshold} kill threshold; cap "
+                    f"{settings.MAX_TOKENS_PER_RUN} - {settings.TOKEN_BUDGET_HEADROOM} "
+                    f"headroom)"
+                )
+                try:
+                    proc.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                break
 
         rc = await proc.wait()
         stderr_text = await stderr_task

@@ -15,8 +15,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# pnpm + yarn for repos that prefer them
-RUN npm install -g pnpm@9 yarn@1
+# pnpm + yarn for repos that prefer them, plus the Codex CLI which drives the agent loop.
+RUN npm install -g pnpm@9 yarn@1 @openai/codex
 
 WORKDIR /app
 
@@ -25,10 +25,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY runner /app/runner
 COPY README.md /app/README.md
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-# Per-run workspaces live here (override with WORKSPACE_ROOT)
-RUN mkdir -p /work
+# Per-run workspaces live here (override with WORKSPACE_ROOT) and Codex needs
+# its config dir to exist before first use.
+RUN mkdir -p /work /root/.codex
 ENV WORKSPACE_ROOT=/work
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "runner.main"]
+CMD ["/app/entrypoint.sh"]

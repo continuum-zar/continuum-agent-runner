@@ -93,6 +93,23 @@ class BackendClient:
         if r.status_code >= 400:
             logger.warning("backend.finalize_non_2xx", status=r.status_code, body=r.text[:300])
 
+    async def fetch_run_context(self, run_id: str) -> dict[str, Any]:
+        """
+        Fetch the seed context (task + comments + RAG slice) for a run.
+
+        The API no longer embeds this in the Redis job payload to keep the stream
+        small (Phase 2c); we pull it on job start instead. Returns ``{}`` when the
+        backend response is missing or malformed so a context miss never blocks a
+        build (context is best-effort on the API side too).
+        """
+        path = f"/api/v1/internal/agent/runs/{run_id}/context"
+        r = await self._get(path)
+        if r.status_code >= 400:
+            raise RuntimeError(f"run_context_fetch_failed: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        ctx = data.get("context") if isinstance(data, dict) else None
+        return ctx if isinstance(ctx, dict) else {}
+
     async def fetch_installation_token(self, repo_full_name: str) -> str:
         """
         Ask the backend to mint a GitHub App installation access token for the

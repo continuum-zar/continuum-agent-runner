@@ -4,6 +4,7 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 # Worker process — no HTTP port to health-check.
-startCommand = "python -m runner.main"
+# Use the Dockerfile entrypoint so codex login runs before the runner starts.
+startCommand = "/app/entrypoint.sh"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

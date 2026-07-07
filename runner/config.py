@@ -18,6 +18,23 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_PROVIDER: str = "openai"
     LLM_MODEL: str = "gpt-5-codex"
+    # OpenAI-compatible endpoint used for the light orchestration calls below
+    # (Codex itself authenticates separately via `codex login`).
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+
+    # Orchestration: a large "orchestrator" model decomposes the task into an
+    # execution plan and delegates light work to small, independent workers —
+    # parallel repo "scouts" before the coding agent starts, and a verifier
+    # after it finishes. Codex remains the single coding executor; disabling
+    # this falls back to the plain single-Codex run.
+    ORCHESTRATION_ENABLED: bool = True
+    LLM_ORCHESTRATOR_MODEL: str = "gpt-4.1"
+    LLM_WORKER_MODEL: str = "gpt-4.1-mini"
+    MAX_SCOUT_WORKERS: int = 3
+    WORKER_LLM_TIMEOUT_SECONDS: int = 60
+    # Ceiling for the whole pre-flight phase (orchestrator plan + parallel scouts).
+    SCOUT_PHASE_TIMEOUT_SECONDS: int = 300
+    VERIFIER_ENABLED: bool = True
 
     # Codex CLI
     CODEX_BIN: str = "codex"

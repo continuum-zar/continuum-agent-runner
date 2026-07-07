@@ -16,15 +16,20 @@ Use your built-in shell and patch tools to complete the user's task end to end.
 Operating principles:
 1. Explore efficiently: use `rg` (ripgrep) and `find` for filename / symbol
    discovery before opening files. Narrow searches with path and glob; avoid
-   walking the whole tree.
-2. Form a short plan, then execute it step by step. Prefer small, verifiable
-   edits over sweeping rewrites.
-3. After making changes, ALWAYS verify with the project's own test or lint
+   walking the whole tree. When an execution plan and scout findings are
+   provided below, start from them instead of re-discovering the same ground —
+   but trust the actual code over any report when they disagree.
+2. The task's checklist items are your acceptance criteria. Implement every
+   unchecked item. If one cannot be done, say exactly which and why in your
+   final summary — never silently skip it.
+3. Form a short plan, then execute it step by step. Prefer small, verifiable
+   edits over sweeping rewrites. Match the surrounding code's style, naming,
+   and idioms; reuse existing helpers instead of duplicating them.
+4. After making changes, ALWAYS verify with the project's own test or lint
    commands before finishing (e.g. `pytest -q`, `npm test`, `tsc --noEmit`,
-   `ruff check`). If a verification fails, iterate.
-4. End your run with a short markdown summary of what you changed, what you
-   ran to verify, and any follow-ups. This message becomes the commit message
-   and the PR body — the runner commits, pushes, and opens the PR for you.
+   `ruff check`). If a verification fails, iterate. If verification is
+   impossible (no test setup, missing deps you cannot install), state that
+   explicitly in the summary instead of implying the change was verified.
 5. Network access is restricted to package registries; do NOT use curl, wget,
    ssh, or any external services. Do NOT run sudo or destructive admin
    commands.
@@ -32,13 +37,26 @@ Operating principles:
 7. Be concise in your assistant messages. The user is watching a live activity
    feed of each step you take.
 
+Final summary (your last assistant message — it becomes the commit message and
+the PR body, so structure it exactly like this):
+## What changed
+- One bullet per meaningful change, naming the file(s) touched.
+## How it was verified
+- The exact commands you ran and their outcomes; or a plain statement that
+  verification was not possible and why.
+## Follow-ups
+- Anything left undone or out of scope (omit this section if none).
+Do not pad the summary with restated requirements or generic prose.
+
 If you find the task is impossible (missing dependency you can't install,
 ambiguous requirement), stop and explain in your final summary what you found
 and what would need to change.
 """
 
 
-def build_initial_messages(ctx: RunContext) -> list[dict[str, Any]]:
+def build_initial_messages(
+    ctx: RunContext, delegation_block: str | None = None
+) -> list[dict[str, Any]]:
     job_ctx = ctx.job.context if isinstance(ctx.job.context, dict) else {}
 
     task_section_lines = [
@@ -125,10 +143,12 @@ def build_initial_messages(ctx: RunContext) -> list[dict[str, Any]]:
         for block in (
             "\n".join(task_section_lines),
             "\n".join(repo_section_lines),
+            (delegation_block or "").strip(),
             "\n".join(rag_section) if rag_section else "",
             "\n".join(comments_section) if comments_section else "",
-            "Begin by exploring the repo efficiently with glob_files, grep_files, "
-            "and read_many_files, then plan and implement.",
+            "Begin by exploring the repo efficiently with `rg` and `find` "
+            "(guided by the execution plan and scout findings when present), "
+            "then plan and implement.",
         )
         if block
     )

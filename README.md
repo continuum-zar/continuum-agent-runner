@@ -3,18 +3,33 @@
 Background worker for the Continuum agentic task completor. Subscribes to a Redis
 stream of pending agent runs published by the Continuum API, then for each job:
 
-1. Fetches a GitHub App installation token (either by minting locally or via the
-   API's signed `/internal/agent/github/installation-token` endpoint).
+1. Fetches a GitHub App installation token via the API's signed
+   `/internal/agent/github/installation-token` endpoint.
 2. Clones the linked repository into a per-run workspace under `/work/<run_id>`.
 3. Checks out the linked branch (or creates `continuum/agent/task-<id>-<run>` for
    PR mode).
-4. Runs a homegrown LiteLLM tool-calling agent loop (read/write/list/patch/run_shell/git).
-5. Pushes the final commit and (in PR mode) opens a PR back into the linked branch.
-6. Streams `AgentEvent` messages to Redis Pub/Sub channel
-   `continuum:agent:run:<run_id>`, which the API forwards to the browser via SSE.
-7. Persists every event to the API via `/internal/agent/runs/<run_id>/events` so
+4. **Orchestrates the run** (`runner/agent/delegation.py`): a large orchestrator
+   model decomposes the task into an execution plan and delegates research to
+   small, independent *scout* workers that explore the repo **in parallel**
+   (read-only: file tree, ripgrep, capped file reads).
+5. Runs the **Codex CLI** coding agent (`runner/agent/codex_runner.py`) with the
+   plan + scout findings injected into its prompt; Codex does the actual coding
+   with its built-in shell/patch tools.
+6. Runs a small *verifier* worker that checks the produced diff against the
+   task's checklist and tightens the final summary before it becomes the commit
+   message / PR body.
+7. Commits, pushes, and (in PR mode) opens a PR back into the linked branch —
+   Codex itself is forbidden from touching the remote.
+8. Streams `AgentEvent` messages (including `subagent_started` /
+   `subagent_update` / `subagent_completed` for the delegated workers) to Redis
+   Pub/Sub channel `continuum:agent:run:<run_id>`, which the API forwards to
+   the browser via SSE.
+9. Persists every event to the API via `/internal/agent/runs/<run_id>/events` so
    the Build run timeline is replayable.
-8. Cleans up the workspace.
+10. Cleans up the workspace.
+
+Orchestration is best-effort: any failure or `ORCHESTRATION_ENABLED=false`
+degrades to a plain single-Codex run.
 
 ## Why a separate service
 
@@ -44,35 +59,44 @@ Required env vars (see `.env.example`):
 | `REDIS_URL` | Job stream + per-run pub/sub channel (must match the API service) |
 | `BACKEND_URL` | Continuum API public URL, e.g. `https://api.continuumapp.co.za` |
 | `AGENT_RUNNER_HMAC_SECRET` | Shared secret for HMAC-signed callbacks to the API |
-| `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` | Same values as the API uses |
-| `LLM_EXPLORE_MODEL`, `LLM_SYNTHESIZE_MODEL` | Route cheap search/read turns to a high-limit model and write/commit turns to the stronger model |
-| `LLM_SYNTHESIZE_TOOLS` | Comma-separated tool names that permanently switch the run from explore to synthesize mode |
+| `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` | `LLM_MODEL` drives the Codex CLI coding agent (default `gpt-5-codex`) |
+| `LLM_BASE_URL` | OpenAI-compatible endpoint for the orchestration calls (default `https://api.openai.com/v1`) |
+| `ORCHESTRATION_ENABLED` | Toggle the orchestrator → workers layer (default `true`) |
+| `LLM_ORCHESTRATOR_MODEL` | Large model that plans and decomposes the task (default `gpt-4.1`) |
+| `LLM_WORKER_MODEL` | Small model for scout/verifier workers (default `gpt-4.1-mini`) |
+| `MAX_SCOUT_WORKERS` | Max parallel repo scouts per run (default 3) |
+| `SCOUT_PHASE_TIMEOUT_SECONDS` | Ceiling for the whole pre-flight phase (default 300) |
+| `VERIFIER_ENABLED` | Toggle the post-build verifier worker (default `true`) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | App credentials so the runner can mint installation tokens locally |
 | `RUNNER_CONCURRENCY` | Worker tasks per process (default 2) |
-| `JOB_STALE_IDLE_MS` | How long a pending Redis stream job must be idle before another worker may reclaim it (default 1200000) |
+| `JOB_STALE_IDLE_MS` | How long a pending Redis stream job must be idle before another worker may reclaim it (default 15000000, kept above the wall-clock ceiling) |
 | `WORKSPACE_ROOT` | Directory for per-run workspaces (default `/work`) |
-| `HISTORY_COMPACT_TOKEN_THRESHOLD` | Estimated-token threshold before old large tool results are compacted (default 60000) |
-| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | Recent tool results to keep verbatim during compaction (default 4) |
 
-## Tools the agent has
+## How a run is orchestrated
 
-| tool | purpose |
-|------|---------|
-| `list_dir` | List files in a directory inside the workspace |
-| `glob_files` | Find tracked files by glob pattern |
-| `grep_files` | Search file contents with ripgrep |
-| `read_file` | Read a file (capped at 200 KB) |
-| `read_many_files` | Read several files in one tool call |
-| `write_file` | Write or overwrite a file |
-| `apply_patch` | Apply a unified diff |
-| `run_shell` | Run an allow-listed shell command |
-| `git_status` | `git status --porcelain` |
-| `git_diff` | `git diff` (working tree or staged) |
-| `commit_and_push` | `git add` + `git commit` + `git push` (and create PR if mode=open_pr) |
-| `done` | Finish the run with a final summary |
+```
+AgentJob ──► orchestrator (LLM_ORCHESTRATOR_MODEL)
+              │  execution plan + scout assignments
+              ├─► scout #1 ┐
+              ├─► scout #2 ├─ parallel, read-only (LLM_WORKER_MODEL)
+              └─► scout #3 ┘
+                    │ findings
+                    ▼
+             Codex CLI run (LLM_MODEL) — the only coding executor
+                    │ diff + summary
+                    ▼
+             verifier (LLM_WORKER_MODEL) — checks diff vs checklist,
+                    │ refines the summary
+                    ▼
+             runner commits / pushes / opens PR
+```
 
-All tools operate inside the per-run workspace; absolute paths or `..` traversal
-out of the workspace are rejected.
+Scouts never touch the shell themselves: the runner executes their file/rg
+selections through the sandboxed `run_shell_capped` and feeds the capped output
+back to the worker model. Codex uses its own built-in shell/patch tools inside
+the workspace. Every delegated step is streamed as `subagent_*` events so the
+UI can show workers being spawned and running simultaneously; all worker token
+usage is added to the run's `tokens_used` budget.
 
 ## Sandbox & security model
 
@@ -140,7 +164,7 @@ the **adversarial-human threat model**:
 | Model tries to `chmod u+s` or numeric `4xxx` to install a setuid binary | `_DENY_RE` (setuid/setgid bit on `chmod`) |
 | Model `eval`s a string or `source`s a file it just wrote | `_DENY_RE` (`eval `, `source `, `. /…`) |
 | Single tool call exhausts memory or hangs forever | `MAX_SHELL_OUTPUT_BYTES`, `MAX_SHELL_TIMEOUT_SECONDS` |
-| Single run consumes unbounded API tokens / wall-clock | `MAX_ITERATIONS`, `MAX_WALL_CLOCK_SECONDS`, `MAX_TOKENS_PER_RUN` |
+| Single run consumes unbounded API tokens / wall-clock | `MAX_WALL_CLOCK_SECONDS`, `MAX_TOKENS_PER_RUN` (+ `TOKEN_BUDGET_HEADROOM`), `SCOUT_PHASE_TIMEOUT_SECONDS` |
 
 Threats we accept (i.e. the deploy operator must decide whether they are
 acceptable):

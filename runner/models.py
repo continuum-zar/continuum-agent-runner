@@ -39,6 +39,12 @@ AgentEventKind = Literal[
     "final_message",
     "error",
     "cancelled",
+    # Orchestration: the orchestrator delegates a step to an independent
+    # worker model (repo scout, verifier). `payload.subagent_id` correlates
+    # the started/update/completed trio; scouts run in parallel.
+    "subagent_started",
+    "subagent_update",
+    "subagent_completed",
 ]
 
 

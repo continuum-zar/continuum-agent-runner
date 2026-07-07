@@ -18,6 +18,7 @@ import time
 from typing import Any, Optional
 
 from runner.agent.context import RunContext
+from runner.agent.delegation import run_preflight, run_verifier
 from runner.agent.prompts import build_initial_messages
 from runner.config import settings
 from runner.github.client import create_pull_request
@@ -41,8 +42,8 @@ _NO_PUSH_RIDER = """\
 """
 
 
-def _build_codex_prompt(ctx: RunContext) -> str:
-    messages = build_initial_messages(ctx)
+def _build_codex_prompt(ctx: RunContext, delegation_block: Optional[str] = None) -> str:
+    messages = build_initial_messages(ctx, delegation_block)
     system = next((m["content"] for m in messages if m["role"] == "system"), "")
     user = next((m["content"] for m in messages if m["role"] == "user"), "")
     return f"{system}\n\n{user}{_NO_PUSH_RIDER}"
@@ -371,7 +372,21 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
     token_kill_threshold = max(
         0, settings.MAX_TOKENS_PER_RUN - settings.TOKEN_BUDGET_HEADROOM
     )
-    prompt = _build_codex_prompt(ctx)
+
+    # Orchestration pre-flight: a large model decomposes the task and small
+    # scout workers explore the repo in parallel. Best-effort — returns None
+    # (plain single-Codex run) on any failure or when disabled.
+    delegation_block = await run_preflight(ctx)
+    if ctx.run_state.cancel_requested:
+        await ctx.events.emit("cancelled", {})
+        return AgentRunResult(
+            status="cancelled",
+            error="cancelled",
+            agent_branch=ctx.workspace.branch if ctx.job.mode == "open_pr" else None,
+            iterations=ctx.iterations,
+            tokens_used=ctx.tokens_used,
+        )
+    prompt = _build_codex_prompt(ctx, delegation_block)
 
     await ctx.events.emit(
         "status",
@@ -459,6 +474,12 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
             iterations=ctx.iterations,
             tokens_used=ctx.tokens_used,
         )
+
+    # Verifier worker: check the diff against the checklist and tighten the
+    # summary before it becomes the commit message / PR body. Best-effort.
+    refined = await run_verifier(ctx, last_summary)
+    if refined:
+        last_summary = refined
 
     try:
         await _commit_push_pr(ctx, last_summary)

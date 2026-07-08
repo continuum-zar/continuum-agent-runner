@@ -220,6 +220,11 @@ async def _spawn_codex(ctx: RunContext, prompt: str) -> asyncio.subprocess.Proce
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # Raise the per-line buffer above asyncio's 64 KiB default: codex emits
+        # one JSON event per line and a single event can embed a large tool-output
+        # log. Without this, a big `npm run build` event overflows readline() with
+        # "Separator is not found, and chunk exceed the limit" and aborts the run.
+        limit=settings.CODEX_STREAM_LIMIT_BYTES,
         cwd=str(ctx.workspace.root),
         env=env,
     )
@@ -254,7 +259,16 @@ async def _cancel_watcher(
 async def _drain_stderr(proc: asyncio.subprocess.Process) -> str:
     assert proc.stderr is not None
     chunks: list[bytes] = []
-    async for line in proc.stderr:
+    while True:
+        try:
+            line = await proc.stderr.readline()
+        except ValueError:
+            # Over-limit stderr line (see CODEX_STREAM_LIMIT_BYTES); readline()
+            # already discarded it. Skip and keep draining so the run doesn't die
+            # on a noisy stderr burst.
+            continue
+        if not line:
+            break
         chunks.append(line)
     return b"".join(chunks).decode("utf-8", errors="replace")
 
@@ -407,7 +421,22 @@ async def run_agent(ctx: RunContext) -> AgentRunResult:
 
     try:
         assert proc.stdout is not None
-        async for raw in proc.stdout:
+        while True:
+            try:
+                raw = await proc.stdout.readline()
+            except ValueError:
+                # A single codex JSON event exceeded CODEX_STREAM_LIMIT_BYTES.
+                # readline() has already dropped the oversized data from the
+                # buffer, so skip this one event and keep the run alive instead
+                # of letting the error abort it.
+                logger.warning("codex.stdout_line_overflow", run_id=ctx.job.run_id)
+                await ctx.events.emit(
+                    "shell_stdout",
+                    {"chunk": "[runner] dropped an oversized codex output line"},
+                )
+                continue
+            if not raw:
+                break
             if time.monotonic() > deadline:
                 error_msg = (
                     f"wall-clock budget exceeded ({settings.MAX_WALL_CLOCK_SECONDS}s)"

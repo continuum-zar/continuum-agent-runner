@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     TOKEN_BUDGET_HEADROOM: int = 200_000
     MAX_SHELL_OUTPUT_BYTES: int = 64_000
     MAX_SHELL_TIMEOUT_SECONDS: int = 600
+    # asyncio StreamReader buffer for codex's `--json` stdout/stderr. Each event
+    # is a single JSON line that embeds tool output (e.g. a full `npm run build`
+    # log), so the asyncio default of 64 KiB per line overflows and raises
+    # "Separator is not found, and chunk exceed the limit", aborting the run.
+    # Size this to hold a large single event; lines still bigger than this are
+    # skipped rather than fatal (see codex_runner).
+    CODEX_STREAM_LIMIT_BYTES: int = 16_777_216  # 16 MiB
 
     # Stream / channel names (must match the API)
     JOB_STREAM: str = "continuum:agent:jobs"
